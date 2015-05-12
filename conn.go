@@ -1,15 +1,27 @@
 package gudp
 
-import "net"
+import (
+	"net"
+	"sync"
+	"time"
+)
 
 type conn struct {
-	udp *net.UDPAddr
+	udp          *net.UDPAddr
+	lastSent     time.Time
+	lastSentLock *sync.Mutex
 }
 
 func newConn(udp *net.UDPAddr) *conn {
 	return &conn{
 		udp: udp,
 	}
+}
+
+func (c *conn) updateLastSent(t time.Time) {
+	c.lastSentLock.Lock()
+	lastSent = t
+	c.lastSentLock.Unlock()
 }
 
 func (c *conn) receive(b []byte) {

@@ -14,6 +14,7 @@ type socket struct {
 	connsLock *sync.RWMutex
 	inConn    map[*net.UDPAddr]time.Time   // Pending inbound connections awaiting approve/deny
 	outConn   map[*net.UDPAddr]connAttempt // Pending outbound connections awaiting response
+	inOutLock *sync.Mutex
 	Events    *events
 }
 
@@ -35,14 +36,16 @@ type connAttempt struct {
 }
 
 type events struct {
-	newConn chan<- *conn
-	NewConn <-chan *conn
-	disconn chan<- *conn
-	Disconn <-chan *conn
-	recv    chan<- *packet
-	Recv    <-chan *packet
-	approve chan<- *unconnPacket
-	Approve <-chan *unconnPacket
+	newConn  chan<- *conn
+	NewConn  <-chan *conn
+	disconn  chan<- *conn
+	Disconn  <-chan *conn
+	recv     chan<- *packet
+	Recv     <-chan *packet
+	approve  chan<- *unconnPacket
+	Approve  <-chan *unconnPacket
+	connFail chan<- *net.UDPAddr
+	ConnFail <-chan *net.UDPAddr
 }
 
 type SocketConfig struct {
@@ -112,27 +115,32 @@ func NewSocket(cfg *SocketConfig) (*socket, error) {
 		connsLock: &sync.RWMutex{},
 		inConn:    map[*net.UDPAddr]time.Time{},
 		outConn:   map[*net.UDPAddr]connAttempt{},
+		inOutLock: &sync.Mutex{},
 		Events:    newEvents(),
 	}
 	go s.poll()
+	go s.checkForTimeouts()
 
 	return s, err
 }
 
 func newEvents() *events {
-	newConnChan := make(chan *conn)
-	disconnChan := make(chan *conn)
-	recvChan := make(chan *packet)
-	approveChan := make(chan *unconnPacket)
+	newConnChan := make(chan *conn, 100)
+	disconnChan := make(chan *conn, 100)
+	recvChan := make(chan *packet, 2000)
+	approveChan := make(chan *unconnPacket, 100)
+	connFailChan := make(chan *net.UDPAddr, 100)
 	return &events{
-		newConn: newConnChan,
-		NewConn: newConnChan,
-		disconn: disconnChan,
-		Disconn: disconnChan,
-		recv:    recvChan,
-		Recv:    recvChan,
-		approve: approveChan,
-		Approve: approveChan,
+		newConn:  newConnChan,
+		NewConn:  newConnChan,
+		disconn:  disconnChan,
+		Disconn:  disconnChan,
+		recv:     recvChan,
+		Recv:     recvChan,
+		approve:  approveChan,
+		Approve:  approveChan,
+		connFail: connFailChan,
+		ConnFail: connFailChan,
 	}
 }
 
@@ -157,6 +165,8 @@ func (s *socket) Connect(addr *net.UDPAddr, approvalData []byte) error {
 func (s *socket) ApproveConnection(addr *net.UDPAddr) error {
 	s.connsLock.Lock()
 	defer s.connsLock.Unlock()
+	s.inOutLock.Lock()
+	defer s.inOutLock.Unlock()
 
 	if _, ok := s.conns[addr]; ok {
 		return errors.New("Cannot create new connection, already exists: " + addr.String())
@@ -189,6 +199,13 @@ func (s *socket) Close() error {
 	return s.udp.Close()
 }
 
+func (s *socket) send(to *net.UDPAddr, data, header []byte) {
+	_, _, err := s.udp.WriteMsgUDP(data, header, to)
+	if err != nil {
+		// TODO: Error handling story
+	}
+}
+
 func (s *socket) poll() {
 	readBytes := make([]byte, s.cfg.MTU)
 	oobBytes := make([]byte, s.cfg.MTU)
@@ -209,10 +226,40 @@ func (s *socket) poll() {
 	}
 }
 
+func (s *socket) checkForTimeouts() {
+	for {
+		s.inOutLock.Lock()
+		for addr, attempt := range s.outConn {
+			if time.Since(attempt.time) > s.cfg.ConnTimeout {
+				delete(s.outConn, addr)
+			}
+			s.Events.connFail <- addr
+		}
+		for addr, timeRecv := range s.inConn {
+			if time.Since(timeRecv) > (s.cfg.ConnTimeout / 2) {
+				delete(s.inConn, addr)
+			}
+		}
+		s.inOutLock.Unlock()
+		time.Sleep(time.Millisecond * 100)
+	}
+}
+
 func (s *socket) incomingConn(addr *net.UDPAddr, approvalData []byte) {
+	if s.cfg.DenyIncoming || s.cfg.MaxConn > len(s.conns) {
+		return
+	}
+
+	s.inOutLock.Lock()
 	s.inConn[addr] = time.Now()
-	s.Events.approve <- &unconnPacket{
-		from: addr,
-		data: approvalData,
+	s.inOutLock.Unlock()
+
+	if s.cfg.AutoAccept {
+		s.ApproveConnection(addr)
+	} else {
+		s.Events.approve <- &unconnPacket{
+			from: addr,
+			data: approvalData,
+		}
 	}
 }
