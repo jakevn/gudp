@@ -226,14 +226,29 @@ func (s *socket) poll() {
 	}
 }
 
+func (s *socket) retryConn(addr *net.UDPAddr) {
+	if attempt, ok := s.outConn[addr]; ok {
+		if attempt.retries+1 <= s.cfg.ConnRetries {
+			attempt.retries++
+			_, _, err := s.udp.WriteMsgUDP(attempt.data, []byte{2}, addr)
+			if err != nil {
+				s.Events.connFail <- addr
+				delete(s.outConn, addr)
+			}
+		} else {
+			s.Events.connFail <- addr
+			delete(s.outConn, addr)
+		}
+	}
+}
+
 func (s *socket) checkForTimeouts() {
 	for {
 		s.inOutLock.Lock()
 		for addr, attempt := range s.outConn {
 			if time.Since(attempt.time) > s.cfg.ConnTimeout {
-				delete(s.outConn, addr)
+				s.retryConn(addr)
 			}
-			s.Events.connFail <- addr
 		}
 		for addr, timeRecv := range s.inConn {
 			if time.Since(timeRecv) > (s.cfg.ConnTimeout / 2) {

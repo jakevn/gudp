@@ -20,7 +20,7 @@ func newConn(udp *net.UDPAddr) *conn {
 
 func (c *conn) updateLastSent(t time.Time) {
 	c.lastSentLock.Lock()
-	lastSent = t
+	c.lastSent = t
 	c.lastSentLock.Unlock()
 }
 
@@ -28,7 +28,7 @@ func (c *conn) receive(b []byte) {
 
 }
 
-func (c *conn) receiveReliable(b []byte) {
+func (c *conn) receiveReliable(data []byte, header []byte) {
 
 }
 
