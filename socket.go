@@ -195,6 +195,16 @@ func (s *socket) ApproveConnection(addr *net.UDPAddr) error {
 	return nil
 }
 
+func (s *socket) disconnect(addr *net.UDPAddr) {
+	s.connsLock.Lock()
+	defer s.connsLock.Unlock()
+
+	if conn, ok := s.conns[addr]; ok {
+		delete(s.conns, addr)
+		s.Events.disconn <- conn
+	}
+}
+
 func (s *socket) Close() error {
 	return s.udp.Close()
 }

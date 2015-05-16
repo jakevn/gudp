@@ -7,9 +7,12 @@ import (
 )
 
 type conn struct {
+	sock         *socket
 	udp          *net.UDPAddr
 	lastSent     time.Time
 	lastSentLock *sync.Mutex
+	rel          *reliable
+	relLock      *sync.Mutex
 }
 
 func newConn(udp *net.UDPAddr) *conn {
@@ -38,4 +41,8 @@ func (c *conn) Send(b []byte) error {
 
 func (c *conn) SendReliable(b []byte) error {
 	return nil
+}
+
+func (c *conn) Disconnect() {
+	c.sock.disconnect(c.udp)
 }
