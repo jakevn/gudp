@@ -14,7 +14,26 @@ type header struct {
 	sendTime    uint64
 }
 
+func (h header) WriteToBitbuf(b *gobit.Buf) {
+	b.WriteUint16(h.objSequence)
+	b.WriteUint16(h.ackSequence)
+	b.WriteUint64(h.ackHistory)
+	b.WriteUint16(h.ackTime)
+	b.WriteUint64(h.sendTime)
+}
+
+func HeaderFromBitbuf(b *gobit.Buf) header {
+	return header{
+		objSequence: b.ReadUint16(),
+		ackSequence: b.ReadUint16(),
+		ackHistory:  b.ReadUint64(),
+		ackTime:     b.ReadUint16(),
+		sendTime:    b.ReadUint64(),
+	}
+}
+
 type reliable struct {
+	cfg               *ReliableCfg
 	openSendBuf       *gobit.Buf
 	sendWindow        []uint16
 	sendWindowTime    []uint32
@@ -34,6 +53,12 @@ type reliable struct {
 	recvSinceLastSend uint32
 }
 
+type ReliableCfg struct {
+	BufSize        uint32
+	SendWindowSize uint32
+	RecvBufSize    uint32
+}
+
 func (r *reliable) SendWindowFull() bool {
 	return r.sendWindowCurr == r.sendWindowMax
 }
@@ -45,5 +70,32 @@ func (r *reliable) ShouldForceAck(currTime time.Time) bool {
 func (r *reliable) ForceAck() {
 	if r.openSendBuf != nil {
 		return
+	}
+	r.openSendBuf = gobit.NewBuf(r.cfg.BufSize)
+	h := r.createHeader()
+	h.WriteToBitbuf(r.openSendBuf)
+}
+
+func (r *reliable) initializeBuf() {
+	r.openSendBuf = gobit.NewBuf(r.cfg.BufSize)
+	r.advanceLocalSeq()
+
+	h := r.createHeader()
+	h.WriteToBitbuf(r.openSendBuf)
+	// ...
+}
+
+func (r *reliable) advanceLocalSeq() {
+	r.localSeq++
+	r.localSeq &= 32767
+}
+
+func (r *reliable) createHeader() header {
+	return header{
+		objSequence: r.localSeq,
+		ackSequence: r.newestRemoteSeq,
+		ackHistory:  r.ackHistory,
+		ackTime:     uint16(time.Since(r.lastRecv)),
+		sendTime:    uint64(time.Now().Unix()),
 	}
 }
