@@ -37,13 +37,9 @@ type reliable struct {
 	openSendBuf       *gobit.Buf
 	sendWindow        []uint16
 	sendWindowTime    []uint32
-	sendWindowCurr    uint16
-	sendWindowMax     uint16
 	sendPackets       map[uint16]*gobit.Buf
 	recvBuf           []*gobit.Buf
 	recvBufSeqDist    []int32
-	recvBuffCurr      uint16
-	recvBuffMax       uint16
 	newestRemoteSeq   uint16
 	localSeq          uint16
 	ackHistory        uint64
@@ -60,7 +56,7 @@ type ReliableCfg struct {
 }
 
 func (r *reliable) SendWindowFull() bool {
-	return r.sendWindowCurr == r.sendWindowMax
+	return len(r.sendWindow) == cap(r.sendWindow)
 }
 
 func (r *reliable) ShouldForceAck(currTime time.Time) bool {
@@ -76,13 +72,25 @@ func (r *reliable) ForceAck() {
 	h.WriteToBitbuf(r.openSendBuf)
 }
 
+func (r *reliable) FlushBuf() *gobit.Buf {
+	if r.openSendBuf == nil {
+		return nil
+	}
+	r.lastSent = time.Now().Unix()
+	defer func() { r.openSendBuf = nil }()
+	return r.openSendBuf
+}
+
 func (r *reliable) initializeBuf() {
 	r.openSendBuf = gobit.NewBuf(r.cfg.BufSize)
 	r.advanceLocalSeq()
 
 	h := r.createHeader()
 	h.WriteToBitbuf(r.openSendBuf)
-	// ...
+
+	r.sendWindow[len(r.sendWindow)] = h.objSequence
+	r.sendWindowTime[len(r.sendWindowTime)] = h.sendTime
+	r.sendPackets[h.objSequence] = r.openSendBuf
 }
 
 func (r *reliable) advanceLocalSeq() {
@@ -98,4 +106,50 @@ func (r *reliable) createHeader() header {
 		ackTime:     uint16(time.Since(r.lastRecv)),
 		sendTime:    uint64(time.Now().Unix()),
 	}
+}
+
+func (r *reliable) AddToBuf(data []byte) {
+	if r.SendWindowFull() {
+		return
+	}
+
+	if r.openSendBuf == nil {
+		r.initializeBuf()
+	}
+
+	if !r.openSendBuf.CanWrite(len(data) * 8) {
+		if len(data) > r.cfg.BufSize {
+			return
+		}
+		r.initializeBuf()
+	}
+	r.openSendBuf.WriteByteArray(data)
+}
+
+func (r *reliable) RouteIncoming(packet *gobit.Buf) {
+	h := HeaderFromBitbuf(packet)
+	dist := seqDist(h.objSequence, r.lastAcceptedSeq)
+
+	if packet.BitSize <= 120 {
+		// ackDelivered(h)
+		// release
+	} else if !seqValid(dist) {
+		// release
+	} else if dist != 1 {
+		// bufferOutOfOrder(dist, packet, h)
+	} else {
+		// ackReceived(h)
+		// ackDelivered(h)
+		// deliver(packet)
+	}
+}
+
+func seqDistance(from, to uint16) int32 {
+	from <<= 1
+	to <<= 1
+	return int16(from-to) >> 1
+}
+
+func seqValid(dist int32) bool {
+	return dist > 0 && dist <= 512
 }
