@@ -33,10 +33,10 @@ func HeaderFromBitbuf(b *gobit.Buf) header {
 }
 
 type reliable struct {
-	cfg               *ReliableCfg
+	cfg               ReliableCfg
 	openSendBuf       *gobit.Buf
 	sendWindow        []uint16
-	sendWindowTime    []uint32
+	sendWindowTime    []uint64
 	sendPackets       map[uint16]*gobit.Buf
 	recvBuf           []*gobit.Buf
 	recvBufSeqDist    []int32
@@ -47,12 +47,26 @@ type reliable struct {
 	lastRecv          time.Time
 	lastAcceptedSeq   uint16
 	recvSinceLastSend uint32
+	createTime        time.Time
 }
 
 type ReliableCfg struct {
 	BufSize        uint32
 	SendWindowSize uint32
 	RecvBufSize    uint32
+}
+
+func NewReliable(cfg ReliableCfg) *reliable {
+	return &reliable{
+		cfg:            cfg,
+		sendWindow:     make([]uint16, cfg.SendWindowSize),
+		sendWindowTime: make([]uint64, cfg.SendWindowSize),
+		sendPackets:    map[uint16]*gobit.Buf{},
+		recvBuf:        make([]*gobit.Buf, cfg.RecvBufSize),
+		recvBufSeqDist: make([]int32, cfg.RecvBufSize),
+		lastSent:       time.Now(),
+		createTime:     time.Now(),
+	}
 }
 
 func (r *reliable) SendWindowFull() bool {
@@ -76,7 +90,7 @@ func (r *reliable) FlushBuf() *gobit.Buf {
 	if r.openSendBuf == nil {
 		return nil
 	}
-	r.lastSent = time.Now().Unix()
+	r.lastSent = time.Now()
 	defer func() { r.openSendBuf = nil }()
 	return r.openSendBuf
 }
@@ -104,7 +118,7 @@ func (r *reliable) createHeader() header {
 		ackSequence: r.newestRemoteSeq,
 		ackHistory:  r.ackHistory,
 		ackTime:     uint16(time.Since(r.lastRecv)),
-		sendTime:    uint64(time.Now().Unix()),
+		sendTime:    uint64((r.createTime.UnixNano() % 1e6) / 1e3),
 	}
 }
 
@@ -117,8 +131,8 @@ func (r *reliable) AddToBuf(data []byte) {
 		r.initializeBuf()
 	}
 
-	if !r.openSendBuf.CanWrite(len(data) * 8) {
-		if len(data) > r.cfg.BufSize {
+	if !r.openSendBuf.CanWrite(uint32(len(data) * 8)) {
+		if uint32(len(data)) > r.cfg.BufSize {
 			return
 		}
 		r.initializeBuf()
@@ -130,8 +144,8 @@ func (r *reliable) RouteIncoming(packet *gobit.Buf) {
 	h := HeaderFromBitbuf(packet)
 	dist := seqDist(h.objSequence, r.lastAcceptedSeq)
 
-	if packet.BitSize <= 120 {
-		// ackDelivered(h)
+	if packet.BitSize() <= 120 {
+		r.ackDelivered(h)
 		// release
 	} else if !seqValid(dist) {
 		// release
@@ -144,10 +158,30 @@ func (r *reliable) RouteIncoming(packet *gobit.Buf) {
 	}
 }
 
-func seqDistance(from, to uint16) int32 {
+func (r *reliable) ackDelivered(h header) {
+	for i, sendSeq := range r.sendWindow {
+		dist := seqDist(sendSeq, h.ackSequence)
+		if dist > 0 {
+			return
+		}
+		if dist <= -64 {
+			// disconnect
+		} else if acked(h.ackHistory, dist) {
+			// messageDelivered(i, h)
+		} else if uint64((time.Since(r.createTime).Nanoseconds()%1e6)/1e3)-r.sendWindowTime[i] > 333 {
+			// messageLost(i)
+		}
+	}
+}
+
+func acked(history uint64, seqDist int32) bool {
+	return (history & (uint64(1) << uint64(-seqDist))) != uint64(0)
+}
+
+func seqDist(from, to uint16) int32 {
 	from <<= 1
 	to <<= 1
-	return int16(from-to) >> 1
+	return int32(from-to) >> 1
 }
 
 func seqValid(dist int32) bool {
